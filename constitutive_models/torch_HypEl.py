@@ -114,7 +114,7 @@ def RandomDeformations(n, amp=0.15):
     F = torch.zeros((n, 3, 3), dtype=torch.double)
     F = torch.eye(3).view((1, 3, 3)).repeat(n, 1, 1)
     for i in range(n):
-        F[i] += torch.rand(size=(3,3))*amp
+        F[i] += (2*torch.rand(size=(3,3))-1)*amp
 
     J = torch.det(F)
     assert( torch.all( J>0.) ), \
@@ -290,9 +290,3 @@ class torch_NeoHooke(torch_HypEl):
         P = self.G*(J**(-2/3))[:,None,None]*(x - I1[:, None, None]/3. * FinvT) \
               + self.lam * ((J-1.)*J)[:, None, None] * FinvT
         return P
-
-
-
-
-demo_NeoHooke()
-# %%

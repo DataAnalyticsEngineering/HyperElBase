@@ -327,6 +327,7 @@ class torch_MooneyRivlin(torch_HypEl):
         self.G = self.E/(2.*(1.+self.nu))
         self.K = self.E/(3.*(1.-2*self.nu))
         self.C01 = C01
+        self.C10 = self.G/2. - self.C01
         self.lam = self.K - 2./3.*self.G
 
     def forward(self, x):
@@ -351,7 +352,7 @@ class torch_MooneyRivlin(torch_HypEl):
         # principal invariants of C
         I1 = torch.einsum("ijj->i", C)
         I2 = 0.5*(I1**2 - torch.norm(C, dim=(1, 2))**2)
-        W = self.G/2 * (I1*J**(-2/3) - 3) \
+        W = self.C10 * (I1*J**(-2/3) - 3) \
             + self.C01 * (I2*J**(-4/3) - 3) \
             + self.lam/2*(J-1)**2
         return W
@@ -379,10 +380,11 @@ class torch_MooneyRivlin(torch_HypEl):
         I2 = 0.5*(I1**2 - torch.norm(C, dim=(1, 2))**2)
         I2bar = I2*(J**(-4/3))
         FinvT = torch.inverse(x).transpose(1, 2)
-        P = self.G*(J**(-2/3))[:,None,None]*(x - I1[:, None, None]/3. * FinvT) \
+        P = self.C10*(J**(-2/3))[:,None,None]*(x - I1[:, None, None]/3. * FinvT) \
               + self.C01 * ( -4./3. * I2bar[:, None, None] * FinvT  \
                             + (J**(-4/3))[:, None, None]*2.0*( I1[:, None, None] * x - torch.bmm(x, C)))  \
             + self.lam * ((J-1.)*J)[:, None, None] * FinvT
         return P
 
+demo_MooneyRivlin()
 # %%

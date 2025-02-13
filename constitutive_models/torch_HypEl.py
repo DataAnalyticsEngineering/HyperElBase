@@ -134,7 +134,7 @@ def demo_HypEl(HypElModel, n=10, amp=0.1):
         hyperelastic model
     n : int
         number of samples, default is 10.
-    amp : double
+    amp : float
         amplitude of the deformation randomness, default is 0.1.
     """
     torch.set_default_dtype(torch.double)
@@ -147,12 +147,25 @@ def demo_NeoHooke(n=10, amp=0.1):
 
     Parameters
     ----------
-    HypElModel : torch_HypEl
-        hyperelastic model
     n : int
         number of samples, default is 10.
+    amp : float
+        amplitude of the deformation randomness, default is 0.1.
     """
     mat = torch_NeoHooke(E=75.e3, nu=0.3)
+    demo_HypEl(mat, n=n, amp=amp)
+
+def demo_MooneyRivlin(n=10, amp=0.1):
+    """ Demonstrates the use of the Mooney Rivlin material
+
+    Parameters
+    ----------
+    n : int
+        number of samples, default is 10.
+    amp : float
+        amplitude of the deformation randomness, default is 0.1.
+    """
+    mat = torch_MooneyRivlin(E=75e3, nu=0.3, C01=5.e3)
     demo_HypEl(mat, n=n, amp=amp)
 
 
@@ -290,3 +303,86 @@ class torch_NeoHooke(torch_HypEl):
         P = self.G*(J**(-2/3))[:,None,None]*(x - I1[:, None, None]/3. * FinvT) \
               + self.lam * ((J-1.)*J)[:, None, None] * FinvT
         return P
+
+class torch_MooneyRivlin(torch_HypEl):
+    def __init__(self, E=75.e3, nu=0.3, C01=0.):
+        """ Hyperelastic compressible Mooney Rivlin material
+
+        Parameters
+        ----------
+        E : float, optional
+            Young's modulus, by default 75.e3
+        nu : float, optional
+            Poisson's ratio, by default 0.3
+        C01 : float, optional
+            Stiffness for the second incompressible invariant, by default 0.0
+        """
+        assert(E>0), \
+            f"Received E={E} MPa but expected E>0. Check input data for consistency."
+        assert(C01>=0.), \
+            f"Received C01={C01} MPa but expected E>0. Check input data for consistency."
+
+        self.E = E
+        self.nu = nu
+        self.G = self.E/(2.*(1.+self.nu))
+        self.K = self.E/(3.*(1.-2*self.nu))
+        self.C01 = C01
+        self.lam = self.K - 2./3.*self.G
+
+    def forward(self, x):
+        """ Computes the (compressible) Neo Hooke strain energy.
+
+        Parameters
+        ----------
+        x : torch.tensor
+            the deformation gradients, shape (n, 3, 3) expected, dtype=torch.double
+
+        Returns
+        -------
+        torch.tensor
+            the strain energy for each deformation gradient
+        """
+        assert( x.shape[-2:] == (3,3)), \
+            f"Expecting input of shape (*, 3, 3) in finite strain material models, but x.shape={x.shape}. Aborting."
+        # compute right Cauchy Green tensor for each deformation
+        C = torch.bmm(x.transpose(1, 2), x)
+        # determinant of F
+        J = torch.linalg.det(x)
+        # principal invariants of C
+        I1 = torch.einsum("ijj->i", C)
+        I2 = 0.5*(I1**2 - torch.norm(C, dim=(1, 2))**2)
+        W = self.G/2 * (I1*J**(-2/3) - 3) \
+            + self.C01 * (I2*J**(-4/3) - 3) \
+            + self.lam/2*(J-1)**2
+        return W
+
+    def stress(self, x):
+        """ Analytical stress for reference.
+
+        Parameters
+        ----------
+        x : torch.tensor
+            the deformation gradients, shape (n, 3, 3) expected, dtype=torch.double
+        
+        Returns
+        -------
+        torch.tensor
+            the 1st Piola Kirchoff stress tensors
+        
+        """
+        assert( x.shape[-2:] == (3,3)), \
+            f"Expecting input of shape (*, 3, 3) in finite strain material models, but x.shape={x.shape}. Aborting."
+        C = torch.bmm(x.transpose(1, 2), x)
+        J = torch.linalg.det(x)
+        I1 = torch.einsum("ijj->i", C)
+        I1bar = I1*(J**(-2/3))
+        I2 = 0.5*(I1**2 - torch.norm(C, dim=(1, 2))**2)
+        I2bar = I2*(J**(-4/3))
+        FinvT = torch.inverse(x).transpose(1, 2)
+        P = self.G*(J**(-2/3))[:,None,None]*(x - I1[:, None, None]/3. * FinvT) \
+              + self.C01 * ( -4./3. * I2bar[:, None, None] * FinvT  \
+                            + (J**(-4/3))[:, None, None]*2.0*( I1[:, None, None] * x - torch.bmm(x, C)))  \
+            + self.lam * ((J-1.)*J)[:, None, None] * FinvT
+        return P
+
+# %%

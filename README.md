@@ -23,7 +23,7 @@ The documentation will be placed in a LaTeX document for now. This document (inc
 ## Utility routines
 Utilities are provided to facilitate testing etc.
 
-* `rel_err(a, a_ref, eps)` computes relative errors and is safe w.r.t. division by zero errors, as long as $`\eps>0`$
+* `rel_err(a, a_ref, eps)` computes relative errors and is safe w.r.t. division by zero errors, as long as $`\epsilon>0`$
 * `RandomDeformations(n, amp)` defines a dataset of $n$ deformations defined via</br>
   $` \boldsymbol{F}_{(i)} = \left( \begin{array}{ccc} 1 + X & X & X \\ X & 1+X & X \\ X & X & 1+X \end{array} \right)_{(i)},`$</br>
   where $`X \sim `$ `amp * `$`\mathcal{U}([-1, 1])`$ (i.e. uniformly random entries of the displacement gradient).

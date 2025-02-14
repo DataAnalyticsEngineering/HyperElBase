@@ -106,7 +106,7 @@ def validate_stress( HypElModel, F, eps=1e-3):
     err_abs, err_rel = rel_err(P, P_analytic, eps=1e-3)
     
     for i in range(F.shape[0]):
-        print(f"rel. error {i:3d}: {100.*err_rel[i]:6.2f} %")
+        print(f"rel. error {i:3d}: {100.*err_rel[i]:16.12f} %")
     return err_abs, err_rel
 
 
@@ -139,7 +139,7 @@ def RandomDeformations(n, amp=0.15, isochoric=False):
         F /= (J**(1/3))[:, None, None]
     return F
 
-def demo_HypEl(HypElModel, n=10, amp=0.1):
+def demo_HypEl(HypElModel, n=10, amp=0.1, isochoric=False):
     """ Demonstrates any torch_HypEl model
 
     An implementation of the stress via analytic expressions
@@ -152,10 +152,13 @@ def demo_HypEl(HypElModel, n=10, amp=0.1):
     n : int
         number of samples, default is 10.
     amp : float
-        amplitude of the deformation randomness, default is 0.1.
+        amplitude of the deformation randomness, default is 0.1
+    isochoric : bool
+        take isochoric deformations, default is False
     """
     torch.set_default_dtype(torch.double)
-    F = RandomDeformations(n=n, amp=amp)
+    F = RandomDeformations(n=n, amp=amp, isochoric=isochoric)
+    F.requires_grad=True
     err_abs, err_rel = validate_stress(HypElModel, F)
 
 
@@ -167,7 +170,7 @@ def demo_NeoHooke(n=10, amp=0.1):
     n : int
         number of samples, default is 10.
     amp : float
-        amplitude of the deformation randomness, default is 0.1.
+        amplitude of the deformation randomness, default is 0.1
     """
     mat = torch_NeoHooke(E=75.e3, nu=5.e3)
     demo_HypEl(mat, n=n, amp=amp)
@@ -423,6 +426,99 @@ class torch_MooneyRivlin(torch_HypEl):
 
     def stress(self, x):
         """ Analytical stress of the Mooney Rivlin model for reference.
+
+        Parameters
+        ----------
+        x : torch.tensor
+            the deformation gradients, shape (n, 3, 3) expected, dtype=torch.double
+        
+        Returns
+        -------
+        torch.tensor
+            1st Piole Kirchhoff stress for each deformation gradient
+        
+        """
+        return self.W(x, stress=True)[1]
+
+class torch_Gent(torch_HypEl):
+    def __init__(self, E=75.e3, nu=0.3, Jm=100.):
+        """ Hyperelastic compressible Gent material
+
+        Based on https://en.wikipedia.org/wiki/Gent_hyperelastic_model
+
+        Parameters
+        ----------
+        E : float, optional
+            Young's modulus, by default 75.e3
+        nu : float, optional
+            Poisson's ratio, by default 0.3
+        Jm : float, optional
+            Additional parameter of the Gent model, by default 100
+        """
+        assert(E>0), \
+            f"Received E={E} MPa but expected E>0. Check input data for consistency."
+        assert(Jm>0), \
+            f"Received Jm={Jm} but expected Jm>0. Check input data for consistency."
+        self.E = E
+        self.nu = nu
+        self.G = self.E/(2.*(1.+self.nu))
+        self.K = self.E/(3.*(1.-2*self.nu))
+        self.lam = self.K - 2./3.*self.G
+        self.Jm = Jm
+
+    def W(self, x, stress=False):
+        """ Computes the compressible Gent model and opt. the stress.
+
+        Parameters
+        ----------
+        x : torch.tensor
+            the deformation gradients, shape (n, 3, 3) expected, dtype=torch.double
+
+        Returns
+        -------
+        torch.tensor
+            the strain energy for each deformation gradient
+        torch.tensor
+            1st Piole Kirchhoff stress for each deformation gradient
+        """
+        assert( x.shape[-2:] == (3,3)), \
+            f"Expecting input of shape (*, 3, 3) in finite strain material models, but x.shape={x.shape}. Aborting."
+        # compute right Cauchy Green tensor for each deformation
+        C = torch.bmm(x.transpose(1, 2), x)
+        # determinant of F
+        J = torch.linalg.det(x)
+        # principal invariants of C
+        I1 = torch.einsum("ijj->i", C)
+        I2 = 0.5*(I1**2 - torch.norm(C, dim=(1, 2))**2)
+        I1bar = I1*(J**(-2/3))
+        I2bar = I2*(J**(-4/3))
+        w = - self.G/2 * self.Jm * torch.log(1 - (I1bar-3)/self.Jm) \
+                + self.K/2*((J**2-1)/2 - torch.log(J))**4
+        if(not stress):
+            return w, None
+        else:
+            FinvT = torch.inverse(x).transpose(1, 2)
+            P = (self.Jm/(self.Jm+3-I1bar))[:, None, None]*self.G*(J**(-2/3))[:,None,None]*(x - I1[:, None, None]/3. * FinvT) \
+              + self.K/2*((((J**2-1)/2 - torch.log(J))**3)*(J**2-1.))[:, None, None]*FinvT
+            return w, P
+
+    def forward(self, x):
+        """ Computes the (compressible) Gent strain energy.
+
+        Parameters
+        ----------
+        x : torch.tensor
+            the deformation gradients, shape (n, 3, 3) expected, dtype=torch.double
+
+        Returns
+        -------
+        torch.tensor
+            the strain energy for each deformation gradient
+        """
+        return self.W(x, stress=False)[0]
+
+    def stress(self, x):
+        """ Analytical stress of the (compressible) Gent model for reference.
 
         Parameters
         ----------

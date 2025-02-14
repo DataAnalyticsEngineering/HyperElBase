@@ -499,7 +499,7 @@ class torch_Gent(torch_HypEl):
         else:
             FinvT = torch.inverse(x).transpose(1, 2)
             P = (self.Jm/(self.Jm+3-I1bar))[:, None, None]*self.G*(J**(-2/3))[:,None,None]*(x - I1[:, None, None]/3. * FinvT) \
-              + self.K/2*((((J**2-1)/2 - torch.log(J))**3)*(J**2-1.))[:, None, None]*FinvT
+              + self.K*2.*((((J**2-1)/2 - torch.log(J))**3)*(J**2-1.))[:, None, None]*FinvT
             return w, P
 
     def forward(self, x):

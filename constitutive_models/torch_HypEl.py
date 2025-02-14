@@ -110,7 +110,23 @@ def validate_stress( HypElModel, F, eps=1e-3):
     return err_abs, err_rel
 
 
-def RandomDeformations(n, amp=0.15):
+def RandomDeformations(n, amp=0.15, isochoric=False):
+    """ Creates random deformation gradients, e.g., for testing
+
+    Parameters
+    ----------
+    n : int
+        number of random tensors
+    amp : float, optional
+        amplitude of the random values, by default 0.15
+    isochoric : bool, optional
+        if True the returned deformations are isochoric, by default False
+
+    Returns
+    -------
+    torch.tensor
+        the n deformation gradients, shape=(n, 3, 3)
+    """
     F = torch.zeros((n, 3, 3), dtype=torch.double)
     F = torch.eye(3).view((1, 3, 3)).repeat(n, 1, 1)
     for i in range(n):
@@ -119,7 +135,8 @@ def RandomDeformations(n, amp=0.15):
     J = torch.det(F)
     assert( torch.all( J>0.) ), \
         f"Generated random tensors indicate self-penetration (J<0)."
-
+    if( isochoric ):
+        F /= (J**(1/3))[:, None, None]
     return F
 
 def demo_HypEl(HypElModel, n=10, amp=0.1):
@@ -138,7 +155,7 @@ def demo_HypEl(HypElModel, n=10, amp=0.1):
         amplitude of the deformation randomness, default is 0.1.
     """
     torch.set_default_dtype(torch.double)
-    F = RandomDeformations(n, amp=amp)
+    F = RandomDeformations(n=n, amp=amp)
     err_abs, err_rel = validate_stress(HypElModel, F)
 
 
@@ -152,7 +169,7 @@ def demo_NeoHooke(n=10, amp=0.1):
     amp : float
         amplitude of the deformation randomness, default is 0.1.
     """
-    mat = torch_NeoHooke(E=75.e3, nu=0.3)
+    mat = torch_NeoHooke(E=75.e3, nu=5.e3)
     demo_HypEl(mat, n=n, amp=amp)
 
 def demo_MooneyRivlin(n=10, amp=0.1):
@@ -165,7 +182,7 @@ def demo_MooneyRivlin(n=10, amp=0.1):
     amp : float
         amplitude of the deformation randomness, default is 0.1.
     """
-    mat = torch_MooneyRivlin(E=75e3, nu=0.3, C01=5.e3)
+    mat = torch_MooneyRivlin(E=75e3, nu=0.3, C01=0.e3)
     demo_HypEl(mat, n=n, amp=amp)
 
 
@@ -228,15 +245,19 @@ class torch_HypEl (torch.nn.Module):
         """
         assert( x.shape[-2:] == (3,3)), \
             f"Expecting input of shape (*, 3, 3) in finite strain material models, but x.shape={x.shape}. Aborting."
+        assert(x.requires_grad), \
+            f"tensors passed to autograd_stress as inputs must have the require_grad flag set to True. Aborting."
         N = x.shape[0]
-        W = self.forward(x)
-        P = torch.autograd.grad(W, x, torch.ones(N), retain_graph=True, create_graph=True,allow_unused=True)[0]
+        w = self.forward(x)
+        P = torch.autograd.grad(w, x, torch.ones(N), retain_graph=True, create_graph=True,allow_unused=True)[0]
         return P
 
 
 class torch_NeoHooke(torch_HypEl):
     def __init__(self, E=75.e3, nu=0.3):
         """ Hyperelastic compressible Neo Hooke material
+
+        Based on https://en.wikipedia.org/wiki/Neo-Hookean_solid
 
         Parameters
         ----------
@@ -254,6 +275,39 @@ class torch_NeoHooke(torch_HypEl):
         self.K = self.E/(3.*(1.-2*self.nu))
         self.lam = self.K - 2./3.*self.G
 
+    def W(self, x, stress=False):
+        """ Computes thecompressible Neo Hooke strain energy and opt. the stress.
+
+        Parameters
+        ----------
+        x : torch.tensor
+            the deformation gradients, shape (n, 3, 3) expected, dtype=torch.double
+
+        Returns
+        -------
+        torch.tensor
+            the strain energy for each deformation gradient
+        torch.tensor
+            1st Piole Kirchhoff stress for each deformation gradient
+        """
+        assert( x.shape[-2:] == (3,3)), \
+            f"Expecting input of shape (*, 3, 3) in finite strain material models, but x.shape={x.shape}. Aborting."
+        # compute right Cauchy Green tensor for each deformation
+        C = torch.bmm(x.transpose(1, 2), x)
+        # determinant of F
+        J = torch.linalg.det(x)
+        # principal invariants of C
+        I1 = torch.einsum("ijj->i", C)
+        I2 = 0.5*(I1**2 - torch.norm(C, dim=(1, 2))**2)
+        w = self.G/2 * (I1*J**(-2/3) - 3) + self.lam/2*(J-1)**2
+        if(not stress):
+            return w, None
+        else:
+            FinvT = torch.inverse(x).transpose(1, 2)
+            P = self.G*(J**(-2/3))[:,None,None]*(x - I1[:, None, None]/3. * FinvT) \
+              + self.lam * ((J-1.)*J)[:, None, None] * FinvT
+            return w, P
+
     def forward(self, x):
         """ Computes the (compressible) Neo Hooke strain energy.
 
@@ -267,20 +321,10 @@ class torch_NeoHooke(torch_HypEl):
         torch.tensor
             the strain energy for each deformation gradient
         """
-        assert( x.shape[-2:] == (3,3)), \
-            f"Expecting input of shape (*, 3, 3) in finite strain material models, but x.shape={x.shape}. Aborting."
-        # compute right Cauchy Green tensor for each deformation
-        C = torch.bmm(x.transpose(1, 2), x)
-        # determinant of F
-        J = torch.linalg.det(x)
-        # principal invariants of C
-        I1 = torch.einsum("ijj->i", C)
-        I2 = 0.5*(I1**2 - torch.norm(C, dim=(1, 2))**2)
-        W = self.G/2 * (I1*J**(-2/3) - 3) + self.lam/2*(J-1)**2
-        return W
+        return self.W(x, stress=False)[0]
 
     def stress(self, x):
-        """ Analytical stress for reference.
+        """ Analytical stress of the (compressible) Neo Hooke model for reference.
 
         Parameters
         ----------
@@ -290,23 +334,16 @@ class torch_NeoHooke(torch_HypEl):
         Returns
         -------
         torch.tensor
-            the 1st Piola Kirchoff stress tensors
+            1st Piole Kirchhoff stress for each deformation gradient
         
         """
-        assert( x.shape[-2:] == (3,3)), \
-            f"Expecting input of shape (*, 3, 3) in finite strain material models, but x.shape={x.shape}. Aborting."
-        C = torch.bmm(x.transpose(1, 2), x)
-        J = torch.linalg.det(x)
-        I1 = torch.einsum("ijj->i", C)
-        I2 = 0.5*(I1**2 - torch.norm(C, dim=(1, 2))**2)
-        FinvT = torch.inverse(x).transpose(1, 2)
-        P = self.G*(J**(-2/3))[:,None,None]*(x - I1[:, None, None]/3. * FinvT) \
-              + self.lam * ((J-1.)*J)[:, None, None] * FinvT
-        return P
+        return self.W(x, stress=True)[1]
 
 class torch_MooneyRivlin(torch_HypEl):
     def __init__(self, E=75.e3, nu=0.3, C01=0.):
         """ Hyperelastic compressible Mooney Rivlin material
+
+        Based on https://en.wikipedia.org/wiki/Mooney%E2%80%93Rivlin_solid
 
         Parameters
         ----------
@@ -330,8 +367,47 @@ class torch_MooneyRivlin(torch_HypEl):
         self.C10 = self.G/2. - self.C01
         self.lam = self.K - 2./3.*self.G
 
+    def W(self, x, stress=False):
+        """ Computes the Mooney Rivlin strain energy and opt. the stress.
+
+        Parameters
+        ----------
+        x : torch.tensor
+            the deformation gradients, shape (n, 3, 3) expected, dtype=torch.double
+
+        Returns
+        -------
+        torch.tensor
+            the strain energy for each deformation gradient
+        torch.tensor
+            1st Piole Kirchhoff stress for each deformation gradient
+        """
+        assert( x.shape[-2:] == (3,3)), \
+            f"Expecting input of shape (*, 3, 3) in finite strain material models, but x.shape={x.shape}. Aborting."
+        # compute right Cauchy Green tensor for each deformation
+        C = torch.bmm(x.transpose(1, 2), x)
+        # determinant of F
+        J = torch.linalg.det(x)
+        # principal invariants of C
+        I1 = torch.einsum("ijj->i", C)
+        I2 = 0.5*(I1**2 - torch.norm(C, dim=(1, 2))**2)
+        w = self.C10 * (I1*J**(-2/3) - 3.) \
+            + self.C01 * (I2*J**(-4/3) - 3.) \
+            + self.lam/2*(J-1)**2
+        if(not stress):
+            return w, None
+        else:
+            I1bar = I1*(J**(-2/3))
+            I2bar = I2*(J**(-4/3))
+            FinvT = torch.inverse(x).transpose(1, 2)
+            P = 2.*self.C10*(J**(-2/3))[:,None,None]*(x - I1[:, None, None]/3. * FinvT) \
+                + self.C01 * ( -4./3. * I2bar[:, None, None] * FinvT  \
+                                + (J**(-4/3))[:, None, None]*2.0*( I1[:, None, None] * x - torch.bmm(x, C)))  \
+                + self.lam * ((J-1.)*J)[:, None, None] * FinvT
+            return w, P
+
     def forward(self, x):
-        """ Computes the (compressible) Neo Hooke strain energy.
+        """ Computes the Mooney Rivlin strain energy.
 
         Parameters
         ----------
@@ -343,22 +419,10 @@ class torch_MooneyRivlin(torch_HypEl):
         torch.tensor
             the strain energy for each deformation gradient
         """
-        assert( x.shape[-2:] == (3,3)), \
-            f"Expecting input of shape (*, 3, 3) in finite strain material models, but x.shape={x.shape}. Aborting."
-        # compute right Cauchy Green tensor for each deformation
-        C = torch.bmm(x.transpose(1, 2), x)
-        # determinant of F
-        J = torch.linalg.det(x)
-        # principal invariants of C
-        I1 = torch.einsum("ijj->i", C)
-        I2 = 0.5*(I1**2 - torch.norm(C, dim=(1, 2))**2)
-        W = self.C10 * (I1*J**(-2/3) - 3) \
-            + self.C01 * (I2*J**(-4/3) - 3) \
-            + self.lam/2*(J-1)**2
-        return W
+        return self.W(x, stress=False)[0]
 
     def stress(self, x):
-        """ Analytical stress for reference.
+        """ Analytical stress of the Mooney Rivlin model for reference.
 
         Parameters
         ----------
@@ -368,23 +432,7 @@ class torch_MooneyRivlin(torch_HypEl):
         Returns
         -------
         torch.tensor
-            the 1st Piola Kirchoff stress tensors
+            1st Piole Kirchhoff stress for each deformation gradient
         
         """
-        assert( x.shape[-2:] == (3,3)), \
-            f"Expecting input of shape (*, 3, 3) in finite strain material models, but x.shape={x.shape}. Aborting."
-        C = torch.bmm(x.transpose(1, 2), x)
-        J = torch.linalg.det(x)
-        I1 = torch.einsum("ijj->i", C)
-        I1bar = I1*(J**(-2/3))
-        I2 = 0.5*(I1**2 - torch.norm(C, dim=(1, 2))**2)
-        I2bar = I2*(J**(-4/3))
-        FinvT = torch.inverse(x).transpose(1, 2)
-        P = self.C10*(J**(-2/3))[:,None,None]*(x - I1[:, None, None]/3. * FinvT) \
-              + self.C01 * ( -4./3. * I2bar[:, None, None] * FinvT  \
-                            + (J**(-4/3))[:, None, None]*2.0*( I1[:, None, None] * x - torch.bmm(x, C)))  \
-            + self.lam * ((J-1.)*J)[:, None, None] * FinvT
-        return P
-
-demo_MooneyRivlin()
-# %%
+        return self.W(x, stress=True)[1]
